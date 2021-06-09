@@ -8,9 +8,9 @@
 
 using namespace Eigen;
 
-double deg2rad(double degree) { return degree * M_PI / 180.0; }
+double deg2rad(const double degree) { return degree * M_PI / 180.0; }
 
-double rad2deg(double radian) { return radian * 180.0 / M_PI; }
+double rad2deg(const double radian) { return radian * 180.0 / M_PI; }
 
 double angle_limit_pi(double angle)
 {
@@ -35,9 +35,8 @@ double gauss(double mu, double sigma)
 class FakeSensorPublisher
 {
 public:
-  FakeSensorPublisher(ros::NodeHandle nh)
-  : _nh(nh),
-    grund_truth(Matrix<double, 3, 1>::Zero()),
+  FakeSensorPublisher()
+  : grund_truth(Matrix<double, 3, 1>::Zero()),
     odom(Matrix<double, 3, 1>::Zero()),
     gps(Matrix<double, 3, 1>::Zero())
   {
@@ -46,12 +45,16 @@ public:
     R << 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, deg2rad(5);
     R = R * R;
 
-    _ground_truth_pub = _nh.advertise<nav_msgs::Odometry>("/fake_sensor_publisher/grund_truth", 10);
-    _odom_pub = _nh.advertise<nav_msgs::Odometry>("/fake_sensor_publisher/odom", 10);
-    _gps_pub = _nh.advertise<nav_msgs::Odometry>("/fake_sensor_publisher/gps", 10);
+    ground_truth_pub_ = pnh_.advertise<nav_msgs::Odometry>("grund_truth", 10);
+    odom_pub_ = pnh_.advertise<nav_msgs::Odometry>("odom", 10);
+    gps_pub_ = pnh_.advertise<nav_msgs::Odometry>("gps", 10);
+
+    previous_stamp_ = ros::Time::now();
+
+    timer_ = nh_.createTimer(ros::Duration(0.01), &FakeSensorPublisher::timerCallback, this);
   }
   ~FakeSensorPublisher() {}
-  nav_msgs::Odometry input2nav_msgs(Matrix<double, 3, 1> pose_2d, Matrix<double, 2, 1> input)
+  nav_msgs::Odometry inputToNavMsgs(Matrix<double, 3, 1> pose_2d, Matrix<double, 2, 1> input)
   {
     nav_msgs::Odometry msg;
     msg.header.frame_id = "world";
@@ -70,44 +73,39 @@ public:
 
     return msg;
   }
-  void run()
+  void timerCallback(const ros::TimerEvent & e)
   {
+    ros::Time current_stamp = ros::Time::now();
+
     nav_msgs::Odometry grund_truth_msg;
     nav_msgs::Odometry odom_msg;
     nav_msgs::Odometry gps_msgs;
 
-    Matrix<double, 2, 1> u(1.0, deg2rad(5));  // input
+    Matrix<double, 2, 1> u(1.0, deg2rad(5));
 
-    double dt = 0.02;
-    ros::Time old_timestamp = ros::Time::now();
-    ros::Rate rate(50);
-    while (ros::ok()) {
-      ros::Time now = ros::Time::now();
+    const double dt = current_stamp.toSec() - previous_stamp_.toSec();
 
-      // ground truth
-      ROS_INFO("%f", dt);
-      grund_truth = motion_model(grund_truth, u, dt);
-      grund_truth_msg = input2nav_msgs(grund_truth, u);
+    // ground truth
+    ROS_INFO("delta time: %f", dt);
+    grund_truth = motionModel(grund_truth, u, dt);
+    grund_truth_msg = inputToNavMsgs(grund_truth, u);
 
-      // dead recogning
-      Matrix<double, 2, 1> ud = motion_noise(u, Q);
-      odom = motion_model(odom, ud, dt);
-      odom_msg = input2nav_msgs(odom, ud);
+    // dead recogning
+    Matrix<double, 2, 1> ud = motionNoise(u, Q);
+    odom = motionModel(odom, ud, dt);
+    odom_msg = inputToNavMsgs(odom, ud);
 
-      // observation
-      Matrix<double, 3, 1> gps = observation_noise(grund_truth, R);
-      gps_msgs = input2nav_msgs(gps, Matrix<double, 2, 1>::Zero());
+    // observation
+    Matrix<double, 3, 1> gps = observationNoise(grund_truth, R);
+    gps_msgs = inputToNavMsgs(gps, Matrix<double, 2, 1>::Zero());
 
-      _ground_truth_pub.publish(grund_truth_msg);
-      _odom_pub.publish(odom_msg);
-      _gps_pub.publish(gps_msgs);
+    ground_truth_pub_.publish(grund_truth_msg);
+    odom_pub_.publish(odom_msg);
+    gps_pub_.publish(gps_msgs);
 
-      rate.sleep();
-      dt = (now - old_timestamp).toSec();
-      old_timestamp = now;
-    }
+    previous_stamp_ = current_stamp;
   }
-  Matrix<double, 3, 1> motion_model(Matrix<double, 3, 1> x, Matrix<double, 2, 1> u, double dt)
+  Matrix<double, 3, 1> motionModel(Matrix<double, 3, 1> x, Matrix<double, 2, 1> u, double dt)
   {
     Matrix<double, 3, 3> F = Matrix<double, 3, 3>::Identity();
     Matrix<double, 3, 2> B;
@@ -117,23 +115,26 @@ public:
     x[2] = angle_limit_pi(x[2]);
     return x;
   }
-  Matrix<double, 2, 1> motion_noise(Matrix<double, 2, 1> u, Matrix<double, 2, 2> Q)
+  Matrix<double, 2, 1> motionNoise(Matrix<double, 2, 1> u, Matrix<double, 2, 2> Q)
   {
     Matrix<double, 2, 1> uw(gauss(0.0, Q(0, 0)), gauss(0.0, Q(1, 1)));
     return u + uw;
   }
-  Matrix<double, 3, 1> observation_noise(Matrix<double, 3, 1> x, Matrix<double, 3, 3> R)
+  Matrix<double, 3, 1> observationNoise(Matrix<double, 3, 1> x, Matrix<double, 3, 3> R)
   {
     Matrix<double, 3, 1> xw(gauss(0.0, R(0, 0)), gauss(0.0, R(1, 1)), gauss(0.0, R(2, 2)));
     return x + xw;
   }
 
 private:
-  ros::NodeHandle _nh;
+  ros::NodeHandle nh_{};
+  ros::NodeHandle pnh_{"~"};
+  ros::Timer timer_;
+  ros::Time previous_stamp_;
 
-  ros::Publisher _ground_truth_pub;
-  ros::Publisher _odom_pub;
-  ros::Publisher _gps_pub;
+  ros::Publisher ground_truth_pub_;
+  ros::Publisher odom_pub_;
+  ros::Publisher gps_pub_;
 
   Matrix<double, 2, 2> Q;
   Matrix<double, 3, 3> R;
@@ -145,9 +146,7 @@ private:
 int main(int argc, char ** argv)
 {
   ros::init(argc, argv, "fake_sensor_publisher_node");
-  ros::NodeHandle nh;
-  FakeSensorPublisher node(nh);
-  node.run();
+  FakeSensorPublisher fake_sensor_publisher;
   ros::spin();
   return 0;
 }
