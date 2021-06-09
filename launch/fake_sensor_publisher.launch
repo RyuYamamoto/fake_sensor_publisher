@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<launch>
+	<node name="fake_sensor_publisher_node" pkg="fake_sensor_publisher" type="fake_sensor_publisher_node" output="screen" />
+	<node name="rviz" pkg="rviz" type="rviz" args="-d $(find fake_sensor_publisher)/config/fake_sensor.rviz"/>
+</launch>
