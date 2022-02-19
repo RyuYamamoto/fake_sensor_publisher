@@ -1,8 +1,12 @@
-#include <nav_msgs/Odometry.h>
-#include <ros/ros.h>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <rclcpp/rclcpp.hpp>
+
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_ros/static_transform_broadcaster.h>
-#include <Eigen/Core>
+
+#include <Eigen/Dense>
+
 #include <cmath>
 #include <iostream>
 
@@ -14,8 +18,12 @@ double rad2deg(const double radian) { return radian * 180.0 / M_PI; }
 
 double angle_limit_pi(double angle)
 {
-  while (angle >= M_PI) { angle -= 2 * M_PI; }
-  while (angle <= -M_PI) { angle += 2 * M_PI; }
+  while (angle >= M_PI) {
+    angle -= 2 * M_PI;
+  }
+  while (angle <= -M_PI) {
+    angle += 2 * M_PI;
+  }
   return angle;
 }
 
@@ -32,76 +40,74 @@ double gauss(double mu, double sigma)
   return mu + sigma * z;
 }
 
-class FakeSensorPublisher
+class FakeSensorPublisher : public rclcpp::Node
 {
 public:
-  FakeSensorPublisher()
-  : grund_truth(Matrix<double, 3, 1>::Zero()),
-    odom(Matrix<double, 3, 1>::Zero()),
-    gps(Matrix<double, 3, 1>::Zero())
+  FakeSensorPublisher(const rclcpp::NodeOptions & node_options)
+  : Node("fake_sensor_publisher", node_options)
   {
-    Q << 0.1, 0, 0, deg2rad(30);
-    Q = Q * Q;
-    R << 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, deg2rad(5);
-    R = R * R;
+    Q_ << 0.1, 0, 0, deg2rad(30);
+    Q_ = Q_ * Q_;
+    R_ << 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, deg2rad(5);
+    R_ = R_ * R_;
 
-    ground_truth_pub_ = pnh_.advertise<nav_msgs::Odometry>("grund_truth", 10);
-    odom_pub_ = pnh_.advertise<nav_msgs::Odometry>("odom", 10);
-    gps_pub_ = pnh_.advertise<nav_msgs::Odometry>("gps", 10);
+    ground_truth_publisher_ =
+      this->create_publisher<geometry_msgs::msg::PoseStamped>("ground_truth", 10);
+    odometry_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("odom", 10);
+    gnss_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("gnss", 10);
 
-    previous_stamp_ = ros::Time::now();
+    previous_stamp_ = rclcpp::Clock().now();
 
-    timer_ = nh_.createTimer(ros::Duration(0.01), &FakeSensorPublisher::timerCallback, this);
+    timer_ = this->create_wall_timer(std::chrono::milliseconds(static_cast<int>(1000 * 0.01)), std::bind(&FakeSensorPublisher::timerCallback, this));
   }
-  ~FakeSensorPublisher() {}
-  nav_msgs::Odometry inputToNavMsgs(Matrix<double, 3, 1> pose_2d, Matrix<double, 2, 1> input)
+  ~FakeSensorPublisher(){}
+ 
+  geometry_msgs::msg::PoseStamped inputToMsgs(
+    Matrix<double, 3, 1> pose_2d, Matrix<double, 2, 1> input)
   {
-    nav_msgs::Odometry msg;
+    geometry_msgs::msg::PoseStamped msg;
     msg.header.frame_id = "world";
-    msg.child_frame_id = "odom";
-    msg.pose.pose.position.x = pose_2d[0];
-    msg.pose.pose.position.y = pose_2d[1];
+    msg.pose.position.x = pose_2d[0];
+    msg.pose.position.y = pose_2d[1];
 
     tf2::Quaternion quat;
     quat.setRPY(0.0, 0.0, angle_limit_pi(pose_2d[2]));
-    msg.pose.pose.orientation.w = quat.w();
-    msg.pose.pose.orientation.x = quat.x();
-    msg.pose.pose.orientation.y = quat.y();
-    msg.pose.pose.orientation.z = quat.z();
-    msg.twist.twist.linear.x = input[0];
-    msg.twist.twist.angular.z = input[1];
+    msg.pose.orientation.w = quat.w();
+    msg.pose.orientation.x = quat.x();
+    msg.pose.orientation.y = quat.y();
+    msg.pose.orientation.z = quat.z();
 
     return msg;
   }
-  void timerCallback(const ros::TimerEvent & e)
+  void timerCallback()
   {
-    ros::Time current_stamp = ros::Time::now();
+    rclcpp::Time current_stamp = rclcpp::Clock().now();
 
-    nav_msgs::Odometry grund_truth_msg;
-    nav_msgs::Odometry odom_msg;
-    nav_msgs::Odometry gps_msgs;
+    geometry_msgs::msg::PoseStamped grund_truth_msg;
+    geometry_msgs::msg::PoseStamped odom_msg;
+    geometry_msgs::msg::PoseStamped gps_msgs;
 
     Matrix<double, 2, 1> u(1.0, deg2rad(5));
 
-    const double dt = current_stamp.toSec() - previous_stamp_.toSec();
+    const double dt = (current_stamp - previous_stamp_).seconds();
 
     // ground truth
-    ROS_INFO("delta time: %f", dt);
-    grund_truth = motionModel(grund_truth, u, dt);
-    grund_truth_msg = inputToNavMsgs(grund_truth, u);
+    RCLCPP_INFO(get_logger(), "delta time: %f", dt);
+    grund_truth_ = motionModel(grund_truth_, u, dt);
+    grund_truth_msg = inputToMsgs(grund_truth_, u);
 
     // dead recogning
-    Matrix<double, 2, 1> ud = motionNoise(u, Q);
-    odom = motionModel(odom, ud, dt);
-    odom_msg = inputToNavMsgs(odom, ud);
+    Matrix<double, 2, 1> ud = motionNoise(u, Q_);
+    odom_ = motionModel(odom_, ud, dt);
+    odom_msg = inputToMsgs(odom_, ud);
 
     // observation
-    Matrix<double, 3, 1> gps = observationNoise(grund_truth, R);
-    gps_msgs = inputToNavMsgs(gps, Matrix<double, 2, 1>::Zero());
+    Matrix<double, 3, 1> gps = observationNoise(grund_truth_, R_);
+    gps_msgs = inputToMsgs(gps, Matrix<double, 2, 1>::Zero());
 
-    ground_truth_pub_.publish(grund_truth_msg);
-    odom_pub_.publish(odom_msg);
-    gps_pub_.publish(gps_msgs);
+    ground_truth_publisher_->publish(grund_truth_msg);
+    odometry_publisher_->publish(odom_msg);
+    gnss_publisher_->publish(gps_msgs);
 
     previous_stamp_ = current_stamp;
   }
@@ -127,26 +133,19 @@ public:
   }
 
 private:
-  ros::NodeHandle nh_{};
-  ros::NodeHandle pnh_{"~"};
-  ros::Timer timer_;
-  ros::Time previous_stamp_;
+  rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Time previous_stamp_;
 
-  ros::Publisher ground_truth_pub_;
-  ros::Publisher odom_pub_;
-  ros::Publisher gps_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr ground_truth_publisher_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr odometry_publisher_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr gnss_publisher_;
 
-  Matrix<double, 2, 2> Q;
-  Matrix<double, 3, 3> R;
-  Matrix<double, 3, 1> grund_truth;
-  Matrix<double, 3, 1> odom;
-  Matrix<double, 3, 1> gps;
+  Matrix<double, 2, 2> Q_;
+  Matrix<double, 3, 3> R_;
+  Matrix<double, 3, 1> grund_truth_;
+  Matrix<double, 3, 1> odom_;
+  Matrix<double, 3, 1> gps_;
 };
 
-int main(int argc, char ** argv)
-{
-  ros::init(argc, argv, "fake_sensor_publisher_node");
-  FakeSensorPublisher fake_sensor_publisher;
-  ros::spin();
-  return 0;
-}
+#include "rclcpp_components/register_node_macro.hpp"
+RCLCPP_COMPONENTS_REGISTER_NODE(FakeSensorPublisher)
