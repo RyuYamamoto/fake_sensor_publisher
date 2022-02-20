@@ -16,7 +16,7 @@ double deg2rad(const double degree) { return degree * M_PI / 180.0; }
 
 double rad2deg(const double radian) { return radian * 180.0 / M_PI; }
 
-double angle_limit_pi(double angle)
+double normalize(double angle)
 {
   while (angle >= M_PI) {
     angle -= 2 * M_PI;
@@ -51,31 +51,38 @@ public:
     R_ << 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, deg2rad(5);
     R_ = R_ * R_;
 
+    twist_subscriber_ = this->create_subscription<geometry_msgs::msg::Twist>(
+      "twist", 10, std::bind(&FakeSensorPublisher::callbackTwist, this, std::placeholders::_1));
     ground_truth_publisher_ =
       this->create_publisher<geometry_msgs::msg::PoseStamped>("ground_truth", 10);
-    odometry_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("odom", 10);
+    odometry_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
     gnss_publisher_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("gnss", 10);
 
     previous_stamp_ = rclcpp::Clock().now();
 
-    timer_ = this->create_wall_timer(std::chrono::milliseconds(static_cast<int>(1000 * 0.01)), std::bind(&FakeSensorPublisher::timerCallback, this));
+    timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(static_cast<int>(1000 * 0.01)),
+      std::bind(&FakeSensorPublisher::timerCallback, this));
   }
-  ~FakeSensorPublisher(){}
- 
-  geometry_msgs::msg::PoseStamped inputToMsgs(
-    Matrix<double, 3, 1> pose_2d, Matrix<double, 2, 1> input)
+  ~FakeSensorPublisher() {}
+
+  void callbackTwist(const geometry_msgs::msg::Twist msg)
   {
-    geometry_msgs::msg::PoseStamped msg;
-    msg.header.frame_id = "world";
-    msg.pose.position.x = pose_2d[0];
-    msg.pose.position.y = pose_2d[1];
+    twist_ = msg;
+  }
+
+  geometry_msgs::msg::Pose inputToMsgs(Matrix<double, 3, 1> pose_2d)
+  {
+    geometry_msgs::msg::Pose msg;
+    msg.position.x = pose_2d[0];
+    msg.position.y = pose_2d[1];
 
     tf2::Quaternion quat;
-    quat.setRPY(0.0, 0.0, angle_limit_pi(pose_2d[2]));
-    msg.pose.orientation.w = quat.w();
-    msg.pose.orientation.x = quat.x();
-    msg.pose.orientation.y = quat.y();
-    msg.pose.orientation.z = quat.z();
+    quat.setRPY(0.0, 0.0, normalize(pose_2d[2]));
+    msg.orientation.w = quat.w();
+    msg.orientation.x = quat.x();
+    msg.orientation.y = quat.y();
+    msg.orientation.z = quat.z();
 
     return msg;
   }
@@ -84,26 +91,32 @@ public:
     rclcpp::Time current_stamp = rclcpp::Clock().now();
 
     geometry_msgs::msg::PoseStamped grund_truth_msg;
-    geometry_msgs::msg::PoseStamped odom_msg;
     geometry_msgs::msg::PoseStamped gps_msgs;
+    nav_msgs::msg::Odometry odom_msg;
 
-    Matrix<double, 2, 1> u(1.0, deg2rad(5));
+    Matrix<double, 2, 1> u(twist_.linear.x, twist_.angular.z);
 
     const double dt = (current_stamp - previous_stamp_).seconds();
 
     // ground truth
     RCLCPP_INFO(get_logger(), "delta time: %f", dt);
     grund_truth_ = motionModel(grund_truth_, u, dt);
-    grund_truth_msg = inputToMsgs(grund_truth_, u);
+    grund_truth_msg.header.frame_id = "map";
+    grund_truth_msg.header.stamp = current_stamp;
+    grund_truth_msg.pose = inputToMsgs(grund_truth_);
 
     // dead recogning
     Matrix<double, 2, 1> ud = motionNoise(u, Q_);
     odom_ = motionModel(odom_, ud, dt);
-    odom_msg = inputToMsgs(odom_, ud);
+    odom_msg.header.frame_id = "map";
+    odom_msg.header.stamp = current_stamp;
+    odom_msg.pose.pose = inputToMsgs(odom_);
 
     // observation
     Matrix<double, 3, 1> gps = observationNoise(grund_truth_, R_);
-    gps_msgs = inputToMsgs(gps, Matrix<double, 2, 1>::Zero());
+    gps_msgs.header.frame_id = "map";
+    gps_msgs.header.stamp = current_stamp;
+    gps_msgs.pose = inputToMsgs(gps);
 
     ground_truth_publisher_->publish(grund_truth_msg);
     odometry_publisher_->publish(odom_msg);
@@ -118,7 +131,7 @@ public:
     B << dt * std::cos(x[2]), 0, dt * std::sin(x[2]), 0, 0, dt;
 
     x = F * x + B * u;
-    x[2] = angle_limit_pi(x[2]);
+    x[2] = normalize(x[2]);
     return x;
   }
   Matrix<double, 2, 1> motionNoise(Matrix<double, 2, 1> u, Matrix<double, 2, 2> Q)
@@ -136,8 +149,12 @@ private:
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Time previous_stamp_;
 
+  geometry_msgs::msg::Twist twist_;
+
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr twist_subscriber_;
+
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr ground_truth_publisher_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr odometry_publisher_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odometry_publisher_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr gnss_publisher_;
 
   Matrix<double, 2, 2> Q_;
