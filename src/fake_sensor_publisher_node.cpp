@@ -8,6 +8,7 @@
 #include <Eigen/Dense>
 
 #include <cmath>
+#include <random>
 #include <iostream>
 
 using namespace Eigen;
@@ -40,6 +41,22 @@ double gauss(double mu, double sigma)
   return mu + sigma * z;
 }
 
+double getGaussDistribution(double mean, double sigma)
+{
+  std::random_device seed;
+  std::default_random_engine engine(seed());
+  std::normal_distribution<> gauss(mean, sigma);
+  return gauss(engine);
+}
+
+double getExponentialDistribution(double parameter)
+{
+  std::random_device seed;
+  std::default_random_engine engine(seed());
+  std::exponential_distribution<> exponential(parameter);
+  return exponential(engine);
+}
+
 class FakeSensorPublisher : public rclcpp::Node
 {
 public:
@@ -48,8 +65,10 @@ public:
   {
     Q_ << 0.1, 0, 0, deg2rad(30);
     Q_ = Q_ * Q_;
-    R_ << 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, deg2rad(5);
+    R_ << 0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, deg2rad(5);
     R_ = R_ * R_;
+
+    distance_until_noise_ = getExponentialDistribution(1.0 / 5.0);
 
     twist_subscriber_ = this->create_subscription<geometry_msgs::msg::Twist>(
       "twist", 10, std::bind(&FakeSensorPublisher::callbackTwist, this, std::placeholders::_1));
@@ -61,7 +80,7 @@ public:
     previous_stamp_ = rclcpp::Clock().now();
 
     timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(static_cast<int>(1000 * 0.01)),
+      std::chrono::milliseconds(static_cast<int>(1000 * 0.1)),
       std::bind(&FakeSensorPublisher::timerCallback, this));
   }
   ~FakeSensorPublisher() {}
@@ -86,6 +105,15 @@ public:
 
     return msg;
   }
+  void noise(Eigen::Matrix<double, 3, 1> &pose, geometry_msgs::msg::Twist twist, double time_interval)
+  {
+    distance_until_noise_ -=
+      ((std::fabs(twist.linear.x) * time_interval + std::fabs(twist.angular.z) * time_interval));
+    if (distance_until_noise_ <= 0.0) {
+      distance_until_noise_ += getExponentialDistribution(1.0 / 5.0);
+      pose(2) += getGaussDistribution(0.0, M_PI / 60.0);
+    }
+  }
   void timerCallback()
   {
     rclcpp::Time current_stamp = rclcpp::Clock().now();
@@ -100,13 +128,14 @@ public:
 
     // ground truth
     RCLCPP_INFO(get_logger(), "delta time: %f", dt);
-    grund_truth_ = motionModel(grund_truth_, u, dt);
+    Matrix<double, 2, 1> ud = motionNoise(u, Q_);
+    grund_truth_ = motionModel(grund_truth_, ud, dt);
+    //noise(grund_truth_, twist_, dt);
     grund_truth_msg.header.frame_id = "map";
     grund_truth_msg.header.stamp = current_stamp;
     grund_truth_msg.pose = inputToMsgs(grund_truth_);
 
     // dead recogning
-    Matrix<double, 2, 1> ud = motionNoise(u, Q_);
     odom_ = motionModel(odom_, ud, dt);
     odom_msg.header.frame_id = "map";
     odom_msg.header.stamp = current_stamp;
@@ -141,7 +170,7 @@ public:
   }
   Matrix<double, 3, 1> observationNoise(Matrix<double, 3, 1> x, Matrix<double, 3, 3> R)
   {
-    Matrix<double, 3, 1> xw(gauss(0.0, R(0, 0)), gauss(0.0, R(1, 1)), gauss(0.0, R(2, 2)));
+    Matrix<double, 3, 1> xw(gauss(0.0, 1.0) * R(0, 0), gauss(0.0, 1.0) * R(1, 1), gauss(0.0, 1.0) * R(2, 2));
     return x + xw;
   }
 
@@ -162,6 +191,8 @@ private:
   Matrix<double, 3, 1> grund_truth_;
   Matrix<double, 3, 1> odom_;
   Matrix<double, 3, 1> gps_;
+
+  double distance_until_noise_;
 };
 
 #include "rclcpp_components/register_node_macro.hpp"
